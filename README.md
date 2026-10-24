@@ -14,7 +14,7 @@ What was added on top of the original shop:
 | Who finds out when it breaks, and what do they do? | A **Slack alert** that links to a **runbook** |
 | What happens in a real incident? | An **incident drill** and a **blameless postmortem** (see section 9) |
 
-> Author: _your name_ &nbsp;|&nbsp; Cloud: AWS `eu-north-1` (Stockholm) &nbsp;|&nbsp; Cluster: the EKS cluster from Capstone 1
+> Author: Alimi Lateef Adekunle &nbsp;|&nbsp; Cloud: AWS `eu-north-1` (Stockholm) &nbsp;|&nbsp; Cluster: the EKS cluster from Capstone 1
 
 ---
 

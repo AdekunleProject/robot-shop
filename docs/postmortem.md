@@ -1,6 +1,6 @@
 # Postmortem: Robot Shop catalogue outage (MongoDB scaled to zero)
 
-**Status:** complete &nbsp;|&nbsp; **Date:** Saturday 24 October 2026 &nbsp;|&nbsp; **Author:** _your name_
+**Status:** complete &nbsp;|&nbsp; **Date:** Saturday 24 October 2026 &nbsp;|&nbsp; **Author:** Alimi Lateef Adekunle
 **Type:** self-run incident drill (the failure was injected by a script that picks one service at random and scales it to zero)
 **Severity:** partial outage, catalogue and payment health failing for about 12 minutes
 **Blameless:** this document describes what the system and our process allowed to happen. It is not about who is at fault.

@@ -1,7 +1,7 @@
 # Robot Shop: availability SLO and error budget policy
 
 **Service:** Robot Shop (the customer-facing store, reached through the `web` service)
-**Owner:** _your name_ &nbsp;|&nbsp; **Review:** once per week, and after every incident
+**Owner:** Alimi Lateef Adekunle &nbsp;|&nbsp; **Review:** once per week, and after every incident
 
 ## 1. The SLI (what we measure)
 
