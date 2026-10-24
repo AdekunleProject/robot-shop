@@ -1,0 +1,57 @@
+# Adds OpenTelemetry tracing to the payment service WITHOUT rebuilding its image.
+# 1) An init container installs the OpenTelemetry packages into a shared folder.
+# 2) The payment container is started through "opentelemetry-instrument", which
+#    wraps Flask and outgoing HTTP calls and sends traces to the collector.
+# Apply with: kubectl patch deployment payment -n robot-shop --patch-file payment-otel-patch.yaml
+# Undo with:  kubectl rollout undo deployment/payment -n robot-shop
+spec:
+  template:
+    spec:
+      volumes:
+        - name: otel
+          emptyDir: {}
+      initContainers:
+        - name: otel-install
+          image: robotshop/rs-payment:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - pip
+            - install
+            - --no-cache-dir
+            - --target=/otel
+            - opentelemetry-distro==0.48b0
+            - opentelemetry-exporter-otlp-proto-http==1.27.0
+            - opentelemetry-instrumentation-flask==0.48b0
+            - opentelemetry-instrumentation-requests==0.48b0
+          volumeMounts:
+            - name: otel
+              mountPath: /otel
+      containers:
+        - name: payment
+          command:
+            - /otel/bin/opentelemetry-instrument
+            - uwsgi
+            - --ini
+            - payment.ini
+          env:
+            - name: PYTHONPATH
+              value: /otel
+            - name: OTEL_SERVICE_NAME
+              value: payment
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.monitoring.svc:4318
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+            - name: OTEL_TRACES_EXPORTER
+              value: otlp
+            - name: OTEL_METRICS_EXPORTER
+              value: none
+            - name: OTEL_LOGS_EXPORTER
+              value: none
+          resources:
+            limits:
+              memory: 300Mi
+          volumeMounts:
+            - name: otel
+              mountPath: /otel
+              readOnly: true
