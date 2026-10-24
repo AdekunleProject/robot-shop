@@ -1,128 +1,160 @@
-# Sample Microservice Application
+# Voting App: from code to automatic deployment (Capstone 1, "Ship It")
 
-Stan's Robot Shop is a sample microservice application you can use as a sandbox to test and learn containerised application orchestration and monitoring techniques. It is not intended to be a comprehensive reference example of how to write a microservices application, although you will better understand some of those concepts by playing with Stan's Robot Shop. To be clear, the error handling is patchy and there is not any security built into the application.
+A DevOps capstone built on the [dockersamples/example-voting-app](https://github.com/dockersamples/example-voting-app).
+The app is unchanged in behaviour; what this repository adds is everything needed to **ship it**:
+hardened container images, a Kubernetes cluster created with Terraform, a CI pipeline in GitHub Actions
+and a Helm chart with a rehearsed rollback.
 
-You can get more detailed information from my [blog post](https://www.instana.com/blog/stans-robot-shop-sample-microservice-application/) about this sample microservice application.
+> Author: _your name_ &nbsp;|&nbsp; Region: `eu-north-1` (Stockholm) &nbsp;|&nbsp; Cloud: AWS
 
-This sample microservice application has been built using these technologies:
-- NodeJS ([Express](http://expressjs.com/))
-- Java ([Spring Boot](https://spring.io/))
-- Python ([Flask](http://flask.pocoo.org))
-- Golang
-- PHP (Apache)
-- MongoDB
-- Redis
-- MySQL ([Maxmind](http://www.maxmind.com) data)
-- RabbitMQ
-- Nginx
-- AngularJS (1.x)
+## 1. What the app does
 
-The various services in the sample application already include all required Instana components installed and configured. The Instana components provide automatic instrumentation for complete end to end [tracing](https://docs.instana.io/core_concepts/tracing/), as well as complete visibility into time series metrics for all the technologies.
+| Service | Role | Technology |
+|---|---|---|
+| `vote` | Web page where you cast a vote (cats or dogs) | Python / Flask |
+| `redis` | Queue where a new vote waits | Redis |
+| `worker` | Takes votes off the queue and saves them | .NET |
+| `db` | Permanent storage of votes | PostgreSQL |
+| `result` | Live results page | Node.js / Socket.IO |
 
-To see the application performance results in the Instana dashboard, you will first need an Instana account. Don't worry a [trial account](https://instana.com/trial?utm_source=github&utm_medium=robot_shop) is free.
+Data flow: **vote → Redis → worker → PostgreSQL → result**.
 
-## Build from Source
-To optionally build from source (you will need a newish version of Docker to do this) use Docker Compose. Optionally edit the `.env` file to specify an alternative image registry and version tag; see the official [documentation](https://docs.docker.com/compose/env-file/) for more information.
+## 2. Architecture
 
-To download the tracing module for Nginx, it needs a valid Instana agent key. Set this in the environment before starting the build.
+```mermaid
+flowchart LR
+    dev["Developer"] -->|git push| repo["GitHub repository"]
 
-```shell
-$ export INSTANA_AGENT_KEY="<your agent key>"
+    subgraph ci["GitHub Actions (ci.yaml)"]
+        direction TB
+        smoke["1. Smoke test<br/>docker compose + one real vote"]
+        build["2. Build image<br/>tag = commit SHA"]
+        scan["3. Trivy scan<br/>fail on fixable CRITICAL"]
+        push["4. Push (main only)"]
+        smoke --> build --> scan --> push
+    end
+    repo --> ci
+    push --> ghcr[("GitHub Container Registry<br/>ghcr.io")]
+
+    tf["Terraform"] -->|creates| eks
+
+    subgraph aws["AWS eu-north-1, default VPC"]
+        subgraph eks["EKS cluster (Kubernetes 1.35)"]
+            vote["vote"]
+            result["result"]
+            worker["worker"]
+            redis[("redis")]
+            db[("postgres")]
+            vote --> redis
+            redis --> worker
+            worker --> db
+            db --> result
+        end
+    end
+
+    helm["Helm chart<br/>helm/voting-app"] -->|helm install / rollback| eks
+    ghcr -->|image pull| eks
+    user["You (kubectl port-forward)"] --> vote
+    user --> result
 ```
 
-Now build all the images.
+## 3. Repository layout
 
-```shell
-$ docker-compose build
+| Path | What it contains |
+|---|---|
+| `vote/`, `result/`, `worker/` | Application code and one hardened `Dockerfile` each |
+| `docker-compose.yml` | Run the whole app locally |
+| `terraform/` | Creates the EKS cluster in the default VPC |
+| `helm/voting-app/` | The Helm chart and its single `values.yaml` |
+| `.github/workflows/ci.yaml` | The pipeline: test, scan, build, push |
+
+## 4. The five steps
+
+### Step 1: Run it locally
+```bash
+docker compose up --build
+# vote:   http://localhost:8080
+# result: http://localhost:8081
 ```
 
-If you modified the `.env` file and changed the image registry, you need to push the images to that registry
+### Step 2: Containerize it safely
+Every image follows the same three rules:
 
-```shell
-$ docker-compose push
+- **Pinned base images.** Each `FROM` names a tag *and* a digest (`image:tag@sha256:...`), so a build today and a build next month use the same base.
+- **Non-root.** `vote` and `worker` create user `10001`; `result` uses the `node` user (uid 1000). Nothing runs as root.
+- **`.dockerignore`** in every service keeps `.git`, `.env`, build output and docs out of the image.
+
+Base images are on supported versions (Node 24, .NET 10, Python 3.11). An earlier version of this project used Node 18 and .NET 7, which are past end of life: pinning a digest of an image that no longer gets patched only freezes its vulnerabilities, and the Trivy scan caught that (see section 6).
+
+### Step 3: Create a Kubernetes cluster with Terraform
+```bash
+cd terraform
+terraform init
+terraform plan -out=tfplan      # read the plan before applying
+terraform apply tfplan
+aws eks update-kubeconfig --region eu-north-1 --name voting-capstone
+kubectl get nodes
+```
+- Uses the community module `terraform-aws-modules/eks/aws` (`~> 21.0`) with AWS provider `~> 6.0`.
+- Kubernetes **1.35**, chosen because it is in EKS *standard* support (extended support costs six times more per hour).
+- One managed node (`m7i-flex.large`) in the **default VPC**, public subnets, no NAT gateway.
+- **Destroy and recreate from code** was demonstrated: `terraform destroy` removes all 38 resources and `terraform apply` rebuilds them in about five minutes.
+
+### Step 4: Automate with GitHub Actions
+On every push to `main` (and on pull requests) `.github/workflows/ci.yaml` runs:
+
+1. **Smoke test:** starts the whole app with Docker Compose, casts a real vote with `curl`, and waits until it appears in PostgreSQL. This proves vote → Redis → worker → Postgres end to end.
+2. **Build** each image, tagged with the full **commit SHA**.
+3. **Trivy scan:** the job fails on any fixable `CRITICAL` vulnerability.
+4. **Push** to `ghcr.io/<owner>/voting-app-<service>:<sha>`, only for pushes to `main`.
+
+### Step 5: Deploy and roll back with Helm
+```bash
+helm install voting helm/voting-app --set image.tag=<commit-sha> --wait --timeout 5m
+kubectl port-forward svc/vote 8080:8080 &
+kubectl port-forward svc/result 8081:8081 &
+```
+**Bad release on purpose, then rollback:**
+```bash
+helm upgrade voting helm/voting-app --set image.tag=thisdoesnotexist --wait --timeout 90s   # fails
+kubectl get pods        # new pods: ImagePullBackOff, old pods still Running (no downtime)
+helm history voting     # revision 2: failed
+helm rollback voting 1 --wait
+helm history voting     # revision 3: "Rollback to 1"
+```
+Kubernetes keeps the old pods alive until new ones are ready, so the failed release never took the app down.
+
+## 5. Security notes
+
+- **No secrets in Git.** The pipeline pushes with the short-lived `GITHUB_TOKEN`. AWS credentials live in `~/.aws/credentials` on the operator's machine. `.gitignore` excludes Terraform state and plan files.
+- **Pipeline supply chain.** Third-party actions are pinned to full commit SHAs, not tags. The Trivy binary is pinned to a version its vendor lists as safe, following the March 2026 Trivy supply-chain incident. Jobs get read-only permissions; only the push job can write packages.
+- **Pods** run as non-root, drop all Linux capabilities, forbid privilege escalation and use the runtime default seccomp profile.
+
+## 6. Problems met along the way
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Trivy failed `result` and `worker` | Base images (Node 18, .NET 7) were past end of life; `proxy-addr` and `System.Drawing.Common` had fixable CRITICAL CVEs | Moved to Node 24 and .NET 10, updated the lock file, added a fixed `System.Drawing.Common` reference |
+| EKS node group `CREATE_FAILED` | The AWS Free plan only allows some instance types; `t3.medium` was rejected | Used an allowed type (`m7i-flex.large`) |
+| `iam:CreateOpenIDConnectProvider` denied | Account-level policy blocks creating an OIDC provider | Set `enable_irsa = false`; the cluster uses Pod Identity instead |
+| Push of workflow files rejected | Personal access token lacked the `workflow` scope | Created a token with `repo` and `workflow` scopes |
+
+## 7. Known limitations
+
+- **Demo database credentials.** The app's own source code hardcodes `postgres`/`postgres` (`worker/Program.cs`, `result/server.js`), so they appear in `values.yaml`. They are for the demo only; moving them to a Kubernetes Secret would also need code changes.
+- Redis and PostgreSQL use `emptyDir` storage: votes are lost if their pods restart.
+- Services are `ClusterIP`; the app is viewed through `kubectl port-forward`. Setting `service.type=LoadBalancer` would create a public AWS load balancer (not used, to avoid cost).
+- Base images for `redis` and `postgres` in the chart are tagged, not digest-pinned.
+
+## 8. Cost and cleanup
+
+A running cluster costs roughly $0.20 to $0.25 per hour (EKS control plane $0.10, one node, public IPv4 addresses). The environment is created for each working session and destroyed afterwards:
+
+```bash
+helm uninstall voting
+cd terraform && terraform plan -destroy -out=destroy.tfplan && terraform apply destroy.tfplan
 ```
 
-## Run Locally
-You can run it locally for testing.
+## 9. Credits
 
-If you did not build from source, don't worry all the images are on Docker Hub. Just pull down those images first using:
-
-```shell
-$ docker-compose pull
-```
-
-Fire up Stan's Robot Shop with:
-
-```shell
-$ docker-compose up
-```
-
-If you want to fire up some load as well:
-
-```shell
-$ docker-compose -f docker-compose.yaml -f docker-compose-load.yaml up
-```
-
-If you are running it locally on a Linux host you can also run the Instana [agent](https://docs.instana.io/quick_start/agent_setup/container/docker/) locally, unfortunately the agent is currently not supported on Mac.
-
-There is also only limited support on ARM architectures at the moment.
-
-## Marathon / DCOS
-
-The manifests for robotshop are in the *DCOS/* directory. These manifests were built using a fresh install of DCOS 1.11.0. They should work on a vanilla HA or single instance install.
-
-You may install Instana via the DCOS package manager, instructions are here: https://github.com/dcos/examples/tree/master/instana-agent/1.9
-
-## Kubernetes
-You can run Kubernetes locally using [minikube](https://github.com/kubernetes/minikube) or on one of the many cloud providers.
-
-The Docker container images are all available on [Docker Hub](https://hub.docker.com/u/robotshop/).
-
-Install Stan's Robot Shop to your Kubernetes cluster using the [Helm](K8s/helm/README.md) chart.
-
-To deploy the Instana agent to Kubernetes, just use the [helm](https://github.com/instana/helm-charts) chart.
-
-## Accessing the Store
-If you are running the store locally via *docker-compose up* then, the store front is available on localhost port 8080 [http://localhost:8080](http://localhost:8080/)
-
-If you are running the store on Kubernetes via minikube then, find the IP address of Minikube and the Node Port of the web service.
-
-```shell
-$ minikube ip
-$ kubectl get svc web
-```
-
-If you are using a cloud Kubernetes / Openshift / Mesosphere then it will be available on the load balancer of that system.
-
-## Load Generation
-A separate load generation utility is provided in the `load-gen` directory. This is not automatically run when the application is started. The load generator is built with Python and [Locust](https://locust.io). The `build.sh` script builds the Docker image, optionally taking *push* as the first argument to also push the image to the registry. The registry and tag settings are loaded from the `.env` file in the parent directory. The script `load-gen.sh` runs the image, it takes a number of command line arguments. You could run the container inside an orchestration system (K8s) as well if you want to, an example descriptor is provided in K8s directory. For End-user Monitoring ,load is not automatically generated but by navigating through the Robotshop from the browser .For more details see the [README](load-gen/README.md) in the load-gen directory.  
-
-## Website Monitoring / End-User Monitoring
-
-### Docker Compose
-
-To enable Website Monioring / End-User Monitoring (EUM) see the official [documentation](https://docs.instana.io/website_monitoring/) for how to create a configuration. There is no need to inject the JavaScript fragment into the page, this will be handled automatically. Just make a note of the unique key and set the environment variable `INSTANA_EUM_KEY` and `INSTANA_EUM_REPORTING_URL` for the web image within `docker-compose.yaml`.
-
-### Kubernetes
-
-The Helm chart for installing Stan's Robot Shop supports setting the key and endpoint url required for website monitoring, see the [README](K8s/helm/README.md).
-
-## Prometheus
-
-The cart and payment services both have Prometheus metric endpoints. These are accessible on `/metrics`. The cart service provides:
-
-* Counter of the number of items added to the cart
-
-The payment services provides:
-
-* Counter of the number of items perchased
-* Histogram of the total number of items in each cart
-* Histogram of the total value of each cart
-
-To test the metrics use:
-
-```shell
-$ curl http://<host>:8080/api/cart/metrics
-$ curl http://<host>:8080/api/payment/metrics
-```
-
+Application: [dockersamples/example-voting-app](https://github.com/dockersamples/example-voting-app) (Apache 2.0).
