@@ -1,0 +1,40 @@
+# Prometheus rules for the Robot Shop availability SLO (99% over 30 days).
+# The label "release: monitoring" is how Prometheus finds this file.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: robot-shop-slo
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: robot-shop-slo
+      rules:
+        # SLI: share of successful probe requests over 5 minutes
+        - record: robotshop:availability:ratio_5m
+          expr: avg(avg_over_time(probe_success{job="robot-shop-blackbox"}[5m]))
+        - record: robotshop:error_ratio:5m
+          expr: 1 - avg(avg_over_time(probe_success{job="robot-shop-blackbox"}[5m]))
+        - record: robotshop:error_ratio:1h
+          expr: 1 - avg(avg_over_time(probe_success{job="robot-shop-blackbox"}[1h]))
+        - alert: RobotShopEndpointDown
+          expr: probe_success{job="robot-shop-blackbox"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            slo: robot-shop-availability
+          annotations:
+            summary: "Robot Shop URL failing: {{ $labels.instance }}"
+            description: "The probe for {{ $labels.instance }} has failed for more than 1 minute. Customers are seeing errors. This burns the 99% availability error budget."
+            runbook_url: "https://github.com/AdekunleProject/robot-shop/blob/master/docs/runbook.md"
+        - alert: RobotShopAvailabilityFastBurn
+          expr: robotshop:error_ratio:5m > 0.144 and robotshop:error_ratio:1h > 0.144
+          for: 2m
+          labels:
+            severity: critical
+            slo: robot-shop-availability
+          annotations:
+            summary: "Robot Shop is burning its error budget 14x too fast"
+            description: "More than 14.4% of requests failed over both the last 5 minutes and the last hour. At this rate the 30-day error budget is gone in about 2 days."
+            runbook_url: "https://github.com/AdekunleProject/robot-shop/blob/master/docs/runbook.md"

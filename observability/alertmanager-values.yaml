@@ -1,0 +1,35 @@
+# Helm values that tell Alertmanager to send our SLO alerts to Slack.
+# The Slack URL is NOT in this file: it is read from the Kubernetes secret
+# "slack-webhook", which is mounted into Alertmanager.
+alertmanager:
+  alertmanagerSpec:
+    secrets:
+      - slack-webhook
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null"
+      group_by: ["alertname", "instance"]
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 2h
+      routes:
+        - receiver: slack
+          matchers:
+            - slo = "robot-shop-availability"
+        - receiver: "null"
+          matchers:
+            - alertname =~ "Watchdog|InfoInhibitor"
+    receivers:
+      - name: "null"
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/slack-webhook/url
+            send_resolved: true
+            title: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
+            text: |-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              <{{ .Annotations.runbook_url }}|Open the runbook>
+              {{ end }}
