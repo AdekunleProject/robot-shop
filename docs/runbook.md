@@ -5,7 +5,16 @@
 
 ## 1. Mitigate first (stop the damage)
 
-Fix the symptom before finding the cause. Do the first item that applies.
+Fix the symptom before finding the cause.
+
+**Step 0: see what is broken in 10 seconds.**
+```bash
+kubectl get deployments -n robot-shop
+kubectl get pods -n robot-shop
+```
+Anything that is not `1/1` is a suspect. A deployment showing `0/0` has been scaled to zero (this caused the 24 October 2026 incident, see `docs/postmortem.md`).
+
+Then do the first item below that applies.
 
 1. **A change went out recently?** Roll it back:
    ```bash
